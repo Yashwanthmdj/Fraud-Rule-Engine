@@ -100,7 +100,8 @@ class Notifier:
     def status(self) -> dict:
         return {"mode": self.mode, "detail": self.detail, "channels": self.channels, "checks": self.checks,
                 "ses_from": config.SES_FROM, "ses_to": config.SES_TO, "sns_topic": config.SNS_TOPIC_ARN,
-                "region": config.AWS_REGION, "cooldown_seconds": config.ALERT_COOLDOWN_SECONDS}
+                "region": config.AWS_REGION, "cooldown_seconds": config.ALERT_COOLDOWN_SECONDS,
+                "max_per_hour": config.ALERT_MAX_PER_HOUR}
 
     # ------------------------------------------------------------------ rendering
     @staticmethod

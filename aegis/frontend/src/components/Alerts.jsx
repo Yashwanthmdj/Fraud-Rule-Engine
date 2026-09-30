@@ -40,7 +40,7 @@ export default function Alerts({ tick, onSelect, toast }) {
               <div><span>Channels</span><b>{cfg.channels.map((c) => c.toUpperCase()).join(' + ')}</b></div>
               <div><span>Region</span><b className="mono">{cfg.region}</b></div>
               <div><span>Report recipient</span><b className="mono">{cfg.ses_to.join(', ') || '—'}</b></div>
-              <div><span>Storm guard</span><b>1 alert / cardholder / {cfg.cooldown_seconds}s</b></div>
+              <div><span>Storm guard</span><b>1 alert / cardholder / {cfg.cooldown_seconds}s · max {cfg.max_per_hour}/h</b></div>
             </div>
           )}
           <div className="checks">

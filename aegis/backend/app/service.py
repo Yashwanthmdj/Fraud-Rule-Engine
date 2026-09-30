@@ -83,6 +83,7 @@ class Aegis:
                              demo_user={"user_id": config.DEMO_USER_ID, "name": config.DEMO_USER_NAME})
         self._last_test = 0.0
         self._last_alert: Dict[str, datetime] = {}
+        self._sent_times: List[float] = []
         self.started = time.time()
 
     # ------------------------------------------------------------------ lifecycle
@@ -205,13 +206,22 @@ class Aegis:
     async def _alert(self, txn: dict, ev: dict, force: bool = False) -> List[dict]:
         now = datetime.utcnow()
         last = self._last_alert.get(txn["user_id"])
+        self._sent_times = [t for t in self._sent_times if time.time() - t < 3600]
+        why = None
         if not force and last and (now - last).total_seconds() < config.ALERT_COOLDOWN_SECONDS:
+            why = (f"cardholder already alerted {int((now - last).total_seconds())}s ago "
+                   f"(cooldown {config.ALERT_COOLDOWN_SECONDS}s)")
+        elif not force and self.notifier.mode == "live" and len(self._sent_times) >= config.ALERT_MAX_PER_HOUR:
+            why = f"hourly email cap reached ({config.ALERT_MAX_PER_HOUR}/h, AEGIS_ALERT_MAX_PER_HOUR)"
+        if why:
             records = [{"txn_id": txn["id"], "channel": "all", "mode": self.notifier.mode, "status": "suppressed",
                         "subject": self.notifier.subject(txn, ev), "risk_score": ev["score"], "target": "",
-                        "message_id": "", "error": f"cardholder already alerted {int((now - last).total_seconds())}s "
-                                                   f"ago (cooldown {config.ALERT_COOLDOWN_SECONDS}s)"}]
+                        "message_id": "", "error": why}]
         else:
-            self._last_alert[txn["user_id"]] = now
+            if not force:  # manual test / case-report sends don't start the cardholder cooldown
+                self._last_alert[txn["user_id"]] = now
+            if self.notifier.mode == "live":
+                self._sent_times.append(time.time())
             records = await asyncio.to_thread(self.notifier.send, txn, ev)
         out = []
         with SessionLocal() as s:
