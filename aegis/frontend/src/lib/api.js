@@ -1,5 +1,10 @@
+// Empty when the console is served by the backend itself (Render / Docker / run.sh).
+// Set VITE_API_BASE=https://<your-service>.onrender.com when the console is hosted elsewhere (e.g. Vercel).
+export const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '')
+export const apiUrl = (path) => API_BASE + path
+
 async function req(method, path, body) {
-  const res = await fetch(path, {
+  const res = await fetch(apiUrl(path), {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
@@ -23,7 +28,9 @@ export const api = {
   thresholds: (t) => req('PATCH', '/api/settings/thresholds', t),
   notifications: () => req('GET', '/api/notifications?limit=200'),
   resendAlert: (id) => req('POST', `/api/notifications/test/${id}`),
+  testAlert: () => req('POST', '/api/notifications/test'),
+  recheckAlerts: () => req('POST', '/api/notifications/recheck'),
   simulator: () => req('GET', '/api/simulator'),
   patchSim: (p) => req('PATCH', '/api/simulator', p),
-  launch: (name) => req('POST', `/api/scenarios/${name}`),
+  launch: (name, userId) => req('POST', `/api/scenarios/${name}${userId ? `?user_id=${encodeURIComponent(userId)}` : ''}`),
 }

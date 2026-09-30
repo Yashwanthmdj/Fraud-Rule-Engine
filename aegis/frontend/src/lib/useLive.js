@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { API_BASE } from './api'
 
 /** Resilient WebSocket subscription with auto-reconnect and keepalive. */
 export function useLive(onMessage) {
@@ -9,7 +10,8 @@ export function useLive(onMessage) {
   useEffect(() => {
     let ws, retry, ping
     let alive = true
-    const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+    const origin = API_BASE ? new URL(API_BASE) : location
+    const url = `${origin.protocol === 'https:' ? 'wss' : 'ws'}://${origin.host}/ws`
     const connect = () => {
       ws = new WebSocket(url)
       ws.onopen = () => {

@@ -14,6 +14,10 @@
 
 
 
+## Deploy live
+
+The whole app (API, rule engine, simulator, WebSocket and console) runs as one Render service defined in [`render.yaml`](render.yaml). Step-by-step AWS SES/SNS and Render setup, plus a jury demo script: [`aegis/docs/DEPLOY.md`](aegis/docs/DEPLOY.md).
+
 ## Start AEGIS
 
 Requirements: Python 3.9+, Node.js 18+, and npm.
@@ -40,6 +44,32 @@ To stop the server, press `Ctrl+C` in its terminal. To clear the local database 
 - **Tune detection:** Change rule weights and parameters, then backtest before applying changes in the Rules Lab.
 - **Add rules:** Drop a Python plugin into `backend/app/rules/`; the engine discovers it without a restart.
 - **Send alerts:** Use AWS SES or SNS for critical events. Notifications run in dry-run mode by default.
+
+## Real-time decisions
+
+`POST /api/transactions` answers synchronously, the way a payment switch needs it:
+
+```json
+{ "decision": "hold", "latency_ms": 6.4,
+  "stages": { "validate": 1.9, "history": 2.5, "rules": 0.2, "persist": 1.7, "broadcast": 0.1 },
+  "evaluation": { "score": 85, "decision_reason": "Single strong signal on a trusted account: hold and verify with the customer",
+                  "standing": { "tier": "trusted" }, "hits": [ ... ] } }
+```
+
+| Decision | When |
+|---|---|
+| **Approve** | risk below the review threshold |
+| **Step-up OTP** | elevated risk: confirm with OTP / biometrics |
+| **Hold** | high risk, or a single strong signal on an account in good standing |
+| **Decline** | critical risk with 2+ independent signals, any flagged transaction on a compromised account, or critical risk on a watchlisted account |
+
+The WebSocket push to consoles and the SES/SNS alert happen after the response, off the hot path.
+
+## Account memory and learning from reviewers
+
+- **Every customer is judged against their own baseline.** The same large purchase is approved for a customer who habitually spends that much and held for one who doesn't.
+- **Account standing** (Trusted, Normal, New, Watchlist, Compromised) comes from reviewer verdicts. After an analyst confirms fraud, every following transaction on that account is declined, even a small one, until the 30-day window passes.
+- **Learning:** when an analyst clears a large purchase as genuine, a similar amount later scores far lower ("Learned from analyst decision"). Confirmed fraud is excluded from the spending baseline, so fraudulent amounts never become "normal".
 
 ## How scoring works
 
@@ -97,6 +127,8 @@ Open **http://localhost:5173** for the frontend. It proxies API and WebSocket re
 | Impossible travel | Transactions too far apart to be explained by normal travel |
 | Unrecognized device | Devices not previously associated with a cardholder |
 | High-risk merchant | Transactions involving categories such as gift cards or crypto |
+| Account standing | Accounts with confirmed fraud or several unresolved flags |
+| Foreign cash-out | Gift card / crypto / wire purchases from a country the card has never used |
 
 Transaction history used for scoring is limited to events before the transaction being evaluated. This avoids using future data during scoring and backtests.
 

@@ -13,59 +13,107 @@ from . import config
 log = logging.getLogger("aegis.notifier")
 
 
+WANTED = {"auto": ["ses", "sns"], "both": ["ses", "sns"], "ses": ["ses"], "sns": ["sns"], "dry-run": ["ses", "sns"]}
+
+
 class Notifier:
     def __init__(self):
         self._ses = self._sns = None
         self.channels: List[str] = []
         self.mode = "dry-run"
         self.detail = ""
+        self.checks: List[Dict] = []   # pre-flight diagnostics shown in the console
         self.configure()
 
+    def _check(self, name: str, ok: bool, detail: str) -> bool:
+        self.checks.append({"name": name, "ok": ok, "detail": detail})
+        return ok
+
     def configure(self) -> None:
-        want = config.NOTIFY_MODE
-        ses_ready = bool(config.SES_FROM and config.SES_TO)
-        sns_ready = bool(config.SNS_TOPIC_ARN)
-        self.channels = []
-        if want in ("auto", "ses", "both") and (ses_ready or want != "auto"):
-            self.channels.append("ses")
-        if want in ("auto", "sns", "both") and (sns_ready or want != "auto"):
-            self.channels.append("sns")
-        if not self.channels:
-            self.channels = ["ses"]  # still render the email in dry-run so reviewers can see it
+        """Decide live vs dry-run, and record *why*, so "the email isn't arriving" is never a mystery."""
+        want = config.NOTIFY_MODE if config.NOTIFY_MODE in WANTED else "auto"
+        self._ses = self._sns = None
+        self.checks = []
+        ses_ready = self._check("SES sender + recipient", bool(config.SES_FROM and config.SES_TO),
+                                f"{config.SES_FROM or '(AEGIS_SES_FROM unset)'} -> "
+                                f"{', '.join(config.SES_TO) or '(AEGIS_SES_TO unset)'}")
+        sns_ready = self._check("SNS topic", bool(config.SNS_TOPIC_ARN), config.SNS_TOPIC_ARN or "(AEGIS_SNS_TOPIC_ARN unset)")
+        ready = {"ses": ses_ready, "sns": sns_ready}
+        self.channels = [c for c in WANTED[want] if ready[c]] or ["ses"]  # dry-run still renders the email
 
         if want == "dry-run":
             self.mode, self.detail = "dry-run", "AEGIS_NOTIFY_MODE=dry-run"
             return
+        if not (ses_ready or sns_ready):
+            self.mode, self.detail = "dry-run", "no destination: set AEGIS_SES_FROM/AEGIS_SES_TO or AEGIS_SNS_TOPIC_ARN"
+            return
         try:
             import boto3
+            from botocore.config import Config
             session = boto3.Session(region_name=config.AWS_REGION)
             if session.get_credentials() is None:
+                self._check("AWS credentials", False, "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set")
                 self.mode, self.detail = "dry-run", "no AWS credentials found"
                 return
-            if not (ses_ready or sns_ready):
-                self.mode, self.detail = "dry-run", "set AEGIS_SES_FROM/AEGIS_SES_TO or AEGIS_SNS_TOPIC_ARN"
+            cfg = Config(connect_timeout=4, read_timeout=8, retries={"max_attempts": 2})
+            try:
+                ident = session.client("sts", config=cfg).get_caller_identity()
+                self._check("AWS credentials", True, f"valid for account {ident['Account']}")
+            except Exception as exc:
+                self._check("AWS credentials", False, f"rejected by AWS: {exc}")
+                self.mode, self.detail = "dry-run", "AWS rejected the credentials"
                 return
-            self._ses = session.client("ses") if "ses" in self.channels else None
-            self._sns = session.client("sns") if "sns" in self.channels else None
-            self.mode, self.detail = "live", f"region {config.AWS_REGION}"
+            if "ses" in self.channels:
+                self._ses = session.client("ses", config=cfg)
+                self._check_ses_identities()
+            if "sns" in self.channels:
+                self._sns = session.client("sns", config=cfg)
+                self._check_sns_topic()
+            self.mode, self.detail = "live", f"{' + '.join(c.upper() for c in self.channels)} in {config.AWS_REGION}"
         except Exception as exc:  # boto3 missing / bad config -> never crash the pipeline
             self.mode, self.detail = "dry-run", f"{type(exc).__name__}: {exc}"
         log.info("notifier mode=%s channels=%s (%s)", self.mode, self.channels, self.detail)
 
+    def _check_ses_identities(self) -> None:
+        ids = [config.SES_FROM] + [t for t in config.SES_TO if t != config.SES_FROM]
+        try:
+            attrs = self._ses.get_identity_verification_attributes(Identities=ids)["VerificationAttributes"]
+            for i in ids:
+                st = attrs.get(i, {}).get("VerificationStatus", "NotStarted")
+                self._check(f"SES identity {i}", st == "Success",
+                            "verified" if st == "Success" else
+                            f"{st}: click the link AWS emailed to {i} (SES sandbox only delivers to verified addresses)")
+        except Exception as exc:
+            self._check("SES identities", False, f"could not check ({type(exc).__name__}); needs ses:GetIdentityVerificationAttributes")
+
+    def _check_sns_topic(self) -> None:
+        try:
+            subs = self._sns.list_subscriptions_by_topic(TopicArn=config.SNS_TOPIC_ARN)["Subscriptions"]
+            confirmed = [s["Endpoint"] for s in subs if s["SubscriptionArn"].startswith("arn:")]
+            pending = [s["Endpoint"] for s in subs if not s["SubscriptionArn"].startswith("arn:")]
+            self._check("SNS subscribers", bool(confirmed),
+                        (f"confirmed: {', '.join(confirmed)}" if confirmed else "no confirmed subscriber") +
+                        (f"; pending confirmation: {', '.join(pending)}" if pending else ""))
+        except Exception as exc:
+            self._check("SNS subscribers", False, f"could not check ({type(exc).__name__}); needs sns:ListSubscriptionsByTopic")
+
     def status(self) -> dict:
-        return {"mode": self.mode, "detail": self.detail, "channels": self.channels,
+        return {"mode": self.mode, "detail": self.detail, "channels": self.channels, "checks": self.checks,
                 "ses_from": config.SES_FROM, "ses_to": config.SES_TO, "sns_topic": config.SNS_TOPIC_ARN,
                 "region": config.AWS_REGION, "cooldown_seconds": config.ALERT_COOLDOWN_SECONDS}
 
     # ------------------------------------------------------------------ rendering
     @staticmethod
     def subject(txn: dict, ev: dict) -> str:
-        return (f"[AEGIS {ev['level'].upper()} {ev['score']:.0f}/100] ${txn['amount']:,.2f} at "
+        dec = (ev.get("decision") or "").replace("_", "-").upper()
+        return (f"[AEGIS {ev['level'].upper()} {ev['score']:.0f}/100{' ' + dec if dec else ''}] ${txn['amount']:,.2f} at "
                 f"{txn['merchant']} - {txn['user_name'] or txn['user_id']}")[:200]
 
     @staticmethod
     def text_body(txn: dict, ev: dict) -> str:
         lines = [f"AEGIS fraud alert - risk {ev['score']:.0f}/100 ({ev['level']})", "",
+                 f"Decision     {(ev.get('decision') or '-').replace('_', '-').upper()}: {ev.get('decision_reason') or ''}",
+                 f"Account      {ev.get('tier') or '-'}",
                  f"Transaction  {txn['id']}", f"Cardholder   {txn['user_name']} ({txn['user_id']})",
                  f"Amount       ${txn['amount']:,.2f} {txn['currency']}",
                  f"Merchant     {txn['merchant']} [{txn['category']}]",
@@ -85,7 +133,9 @@ class Notifier:
             f"<span style='color:#555'>{e(h['reason'])}</span></td>"
             f"<td style='padding:8px 10px;border-bottom:1px solid #eee;text-align:right;font-family:monospace'>"
             f"+{h['contribution'] * 100:.0f}</td></tr>" for h in ev["hits"])
-        facts = [("Amount", f"${txn['amount']:,.2f} {txn['currency']}"), ("Cardholder", txn["user_name"]),
+        facts = [("Decision", f"{(ev.get('decision') or '-').replace('_', '-').upper()}: {ev.get('decision_reason') or ''}"),
+                 ("Account standing", ev.get("tier") or "-"),
+                 ("Amount", f"${txn['amount']:,.2f} {txn['currency']}"), ("Cardholder", txn["user_name"]),
                  ("Merchant", f"{txn['merchant']} ({txn['category']})"),
                  ("Location", f"{txn['city']}, {txn['country']}"), ("Device", txn["device_id"]),
                  ("Time (UTC)", str(txn["ts"])), ("Transaction", txn["id"])]

@@ -1,0 +1,32 @@
+# Render Blueprint: dashboard.render.com -> New -> Blueprint -> pick this repo.
+# One service runs everything: API, rule engine, simulator, WebSocket and the React console.
+services:
+  - type: web
+    name: aegis-fraud-engine
+    runtime: docker
+    plan: free
+    dockerfilePath: ./aegis/Dockerfile
+    dockerContext: ./aegis
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: AEGIS_NOTIFY_MODE
+        value: auto
+      - key: AWS_REGION
+        value: ap-south-1
+      # All alert/report emails go to this one reviewer mailbox only.
+      - key: AEGIS_SES_FROM
+        value: yashwanthmdj@gmail.com
+      - key: AEGIS_SES_TO
+        value: yashwanthmdj@gmail.com
+      - key: AEGIS_DEMO_EMAIL
+        value: yashwanthmdj@gmail.com
+      - key: AEGIS_DEMO_USER_NAME
+        value: Yashwanth M (Demo)
+      # Secrets: Render asks for these when the Blueprint is created. Never commit them.
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AEGIS_SNS_TOPIC_ARN
+        sync: false

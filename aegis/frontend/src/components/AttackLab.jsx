@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Icon, LevelBadge } from './ui'
-import { api } from '../lib/api'
+import { Icon, LevelBadge, DecisionBadge, TierPill } from './ui'
+import { api, API_BASE } from '../lib/api'
 import { money, clock, pretty } from '../lib/format'
 
 const CITIES = {
@@ -33,13 +33,17 @@ function ManualTxn({ toast, defaultUser }) {
         <label><span>Channel</span><select value={f.channel} onChange={set('channel')}><option value="card_present">card present</option><option value="online">online</option></select></label>
         <button className="btn primary" onClick={send}><Icon name="send" size={14} />Score it</button>
       </div>
-      <pre className="src tiny">{`curl -X POST ${location.origin}/api/transactions \\
+      <pre className="src tiny">{`curl -X POST ${API_BASE || location.origin}/api/transactions \\
   -H 'Content-Type: application/json' \\
   -d '${JSON.stringify(body)}'`}</pre>
       {res && (
         <div className="manual-res">
+          <DecisionBadge decision={res.decision} />
           <LevelBadge level={res.evaluation.level} score={res.evaluation.score} />
-          <span className="mono muted">{res.evaluation.latency_ms} ms · {res.evaluation.rules_run} rules</span>
+          <TierPill tier={res.evaluation.standing?.tier} />
+          <span className="mono muted">{res.latency_ms} ms end-to-end · {res.evaluation.rules_run} rules</span>
+          <span className="muted" style={{ width: '100%' }}>{res.evaluation.decision_reason}</span>
+          <div className="stage-chips">{Object.entries(res.stages || {}).map(([k, v]) => <span key={k} className="mono">{k} {v} ms</span>)}</div>
           {res.evaluation.alert && <span className="pill st-fraud">alert dispatched</span>}
           <ul>{res.evaluation.hits.map((h) => <li key={h.rule_id}><b>{h.rule_name}</b> +{Math.round(h.contribution * 100)}: {h.reason}</li>)}
             {!res.evaluation.hits.length && <li className="muted">No rule fired.</li>}</ul>
@@ -52,11 +56,12 @@ function ManualTxn({ toast, defaultUser }) {
 export default function AttackLab({ stats, feed, toast, onSelect, tick }) {
   const [sim, setSim] = useState(null)
   const [runs, setRuns] = useState([])
+  const [target, setTarget] = useState('demo')
   useEffect(() => { api.simulator().then((s) => { setSim((cur) => cur || s); setRuns(s.log) }) }, [tick.txn])
 
   const setSimState = async (p) => setSim({ ...sim, ...(await api.patchSim(p)) })
   const launch = async (name) => {
-    const r = await api.launch(name)
+    const r = await api.launch(name, target === 'demo' && name !== 'fraud_storm' ? sim.demo_user?.user_id : undefined)
     toast({ tone: 'crit', title: `Attack launched: ${sim.scenarios[name].title}`, body: r.victim_name ? `Victim ${r.victim_name} (${r.home})` : `${r.victims.length} victims` })
     setTimeout(() => api.simulator().then((s) => setRuns(s.log)), 2500)
   }
@@ -84,6 +89,14 @@ export default function AttackLab({ stats, feed, toast, onSelect, tick }) {
         </div>
       </div>
 
+      {sim.demo_user && (
+        <div className="target">
+          <span className="muted">Attack target</span>
+          <button className={`chip ${target === 'demo' ? 'on' : ''}`} onClick={() => setTarget('demo')}><Icon name="user" size={12} />{sim.demo_user.name} · {sim.demo_user.home}</button>
+          <button className={`chip ${target === 'random' ? 'on' : ''}`} onClick={() => setTarget('random')}>Random cardholder</button>
+          <span className="muted">Alerts for every target go only to the configured reviewer mailbox.</span>
+        </div>
+      )}
       <div className="scen-grid">
         {Object.entries(sim.scenarios).map(([key, s]) => (
           <div key={key} className={`card scen ${key === 'fraud_storm' ? 'storm' : ''}`}>
@@ -109,7 +122,7 @@ export default function AttackLab({ stats, feed, toast, onSelect, tick }) {
             </button>
           ))}
         </div>
-        <ManualTxn toast={toast} defaultUser={feed.find((t) => t.source === 'simulator')?.user_id} />
+        <ManualTxn toast={toast} defaultUser={sim.demo_user?.user_id || feed.find((t) => t.source === 'simulator')?.user_id} />
       </div>
     </div>
   )

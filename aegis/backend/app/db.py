@@ -3,8 +3,8 @@ import json
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import (JSON, DateTime, Float, ForeignKey, Index, Integer, String,
-                        Text, create_engine, event)
+from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String,
+                        Text, create_engine, event, inspect, text)
 from sqlalchemy.orm import (DeclarativeBase, Mapped, mapped_column, relationship,
                             sessionmaker)
 
@@ -54,6 +54,11 @@ class Transaction(Base):
     source: Mapped[str] = mapped_column(String(16), default="api")
     scenario: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    # approve | step_up | hold | decline - what the payment switch was told, in real time
+    decision: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, index=True)
+    decision_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tier: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)   # account standing when scored
+    stages: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)      # per-stage pipeline timings (ms)
 
     flags: Mapped[List["Flag"]] = relationship(back_populates="txn", cascade="all, delete-orphan",
                                                order_by="desc(Flag.contribution)")
@@ -117,8 +122,33 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text)
 
 
+class Customer(Base):
+    """Known cardholder contact details (only the demo customer is registered)."""
+    __tablename__ = "customers"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    email: Mapped[str] = mapped_column(String(256), default="")
+    bank: Mapped[str] = mapped_column(String(64), default="")
+    is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    _add_missing_columns()
+
+
+def _add_missing_columns() -> None:
+    """Tiny forward-only migration so an existing aegis.db picks up new nullable columns."""
+    insp = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        have = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name not in have:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {col.name} "
+                                      f"{col.type.compile(engine.dialect)}"))
 
 
 def get_setting(session, key: str, default=None):

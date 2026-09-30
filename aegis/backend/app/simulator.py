@@ -74,15 +74,29 @@ class Profile:
 
 
 class Simulator:
-    def __init__(self, submit: Callable[..., Awaitable[dict]], rate: float = 1.2):
+    def __init__(self, submit: Callable[..., Awaitable[dict]], rate: float = 1.2,
+                 demo_user: Optional[Dict[str, str]] = None):
         self.submit = submit
         self.rate = rate
         self.running = False
         self.rng = random.Random()
         seed_rng = random.Random(1337)
         self.users: List[Profile] = [Profile(i, seed_rng) for i in range(N_USERS)]
+        self.demo: Optional[Profile] = None
+        if demo_user:  # one named, predictable cardholder to target in live demos
+            d = Profile(N_USERS, random.Random(2026))
+            d.user_id, d.name = demo_user["user_id"], demo_user["name"]
+            d.home = ("Hyderabad", "IN", 17.39, 78.49)
+            d.scale = 45.0
+            self.demo = d
+            self.users.insert(0, d)
         self.by_id: Dict[str, Profile] = {u.user_id: u for u in self.users}
         self.scenario_log: List[dict] = []
+
+    def profile_history(self, u: Profile, days: int = 45) -> List[dict]:
+        return [self.normal_txn(u, ts=datetime.utcnow() - timedelta(days=self.rng.uniform(1, days),
+                                                                   hours=self.rng.uniform(0, 12)))
+                for _ in range(self.rng.randint(25, 35))]
 
     # ------------------------------------------------------------------ normal traffic
     def normal_txn(self, u: Profile, ts: Optional[datetime] = None, city=None) -> dict:

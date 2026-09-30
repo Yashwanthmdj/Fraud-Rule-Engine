@@ -1,4 +1,4 @@
-import { LEVEL_LABEL, STATUS_LABEL } from '../lib/format'
+import { LEVEL_LABEL, STATUS_LABEL, DECISION_LABEL, TIER_LABEL } from '../lib/format'
 
 const P = {
   shield: 'M12 2 4 5v6c0 5.5 3.4 9.7 8 11 4.6-1.3 8-5.5 8-11V5z',
@@ -28,6 +28,8 @@ const P = {
   send: 'M22 2 11 13M22 2l-7 20-4-9-9-4z',
   keyboard: 'M2 6h20v12H2zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10',
   cpu: 'M4 4h16v16H4zM9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3',
+  user: 'M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z',
+  brain: 'M12 5a3 3 0 1 0-5.9.8A4 4 0 0 0 4 13a4 4 0 0 0 3 6.5A3 3 0 0 0 12 19zM12 5a3 3 0 1 1 5.9.8A4 4 0 0 1 20 13a4 4 0 0 1-3 6.5A3 3 0 0 1 12 19z',
 }
 
 export function Icon({ name, size = 16, stroke = 2, className = '', style }) {
@@ -51,6 +53,16 @@ export function LevelBadge({ level, score }) {
 
 export function StatusPill({ status }) {
   return <span className={`pill st-${status}`}>{STATUS_LABEL[status] || status}</span>
+}
+
+export function DecisionBadge({ decision }) {
+  if (!decision) return null
+  return <span className={`dec dec-${decision}`}>{DECISION_LABEL[decision] || decision}</span>
+}
+
+export function TierPill({ tier }) {
+  if (!tier) return null
+  return <span className={`pill tier-${tier}`}>{TIER_LABEL[tier] || tier}</span>
 }
 
 export function RiskRing({ score, level, size = 88 }) {

@@ -31,6 +31,10 @@ class Hit:
     evidence: dict
 
 
+# What the payment switch should do with the transaction, returned synchronously.
+DECISIONS = ("approve", "step_up", "hold", "decline")
+
+
 @dataclass
 class Evaluation:
     score: float                      # 0..100
@@ -41,6 +45,9 @@ class Evaluation:
     rules_run: int = 0
     errors: List[dict] = field(default_factory=list)
     latency_ms: float = 0.0
+    decision: str = "approve"         # approve | step_up | hold | decline
+    decision_reason: str = ""
+    standing: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -189,9 +196,35 @@ class RuleEngine:
 
         score = self.fuse(hits)
         hits.sort(key=lambda h: h.contribution, reverse=True)
-        return Evaluation(score=score, level=self.level(score), flagged=score >= self.flag_threshold,
+        level = self.level(score)
+        standing = ctx.standing()
+        decision, why = self.decide(score, level, hits, standing)
+        return Evaluation(score=score, level=level, flagged=score >= self.flag_threshold,
                           alert=score >= self.alert_threshold, hits=hits, rules_run=len(active),
-                          errors=errors, latency_ms=round((time.perf_counter() - t0) * 1000, 3))
+                          errors=errors, latency_ms=round((time.perf_counter() - t0) * 1000, 3),
+                          decision=decision, decision_reason=why, standing=standing)
+
+    def decide(self, score: float, level: str, hits: List[Hit], standing: dict):
+        """Turn a risk score into an action, taking the account's track record into account.
+
+        A single strong signal on an account in good standing is *held* for a quick check with
+        the customer rather than declined outright; the same signal on an account with confirmed
+        fraud, or several independent signals together, is declined.
+        """
+        tier = standing.get("tier", "normal")
+        if score < self.flag_threshold:
+            return "approve", "Risk below the review threshold"
+        if tier == "compromised":
+            return "decline", "Account has confirmed fraud in the last 30 days: block and reissue the card"
+        if level == "critical":
+            if len(hits) >= 2:
+                return "decline", f"{len(hits)} independent risk signals agree"
+            if tier == "watchlist":
+                return "decline", "Critical risk on an account already on the watchlist"
+            return "hold", f"Single strong signal on a {tier} account: hold and verify with the customer"
+        if level == "high":
+            return "hold", "High risk: hold funds until an analyst reviews"
+        return "step_up", "Elevated risk: ask the customer for OTP / biometric confirmation"
 
     @staticmethod
     def fuse(hits: List[Hit]) -> float:

@@ -14,9 +14,9 @@ from fastapi import WebSocket
 from sqlalchemy import func, select
 
 from . import config
-from .db import (Flag, Notification, Review, SessionLocal, Transaction, get_setting, init_db,
+from .db import (Customer, Flag, Notification, Review, SessionLocal, Transaction, get_setting, init_db,
                  put_setting)
-from .engine import RuleEngine, Txn, median
+from .engine import DECISIONS, RuleEngine, Txn, account_standing, median
 from .notifier import Notifier
 from .simulator import Simulator
 
@@ -34,7 +34,8 @@ def iso(dt: Optional[datetime]) -> Optional[str]:
 def txn_dict(t: Transaction, detail: bool = True) -> dict:
     d = {k: getattr(t, k) for k in TXN_FIELDS}
     d.update(ts=iso(t.ts), risk_score=t.risk_score, risk_level=t.risk_level, status=t.status,
-             source=t.source, scenario=t.scenario, latency_ms=t.latency_ms)
+             source=t.source, scenario=t.scenario, latency_ms=t.latency_ms, decision=t.decision,
+             decision_reason=t.decision_reason, tier=t.tier, stages=t.stages)
     if detail:
         d["flags"] = [{"rule_id": f.rule_id, "rule_name": f.rule_name, "score": f.score, "weight": f.weight,
                        "contribution": f.contribution, "reason": f.reason, "evidence": f.evidence} for f in t.flags]
@@ -78,7 +79,9 @@ class Aegis:
         self.engine = RuleEngine(config.RULES_DIR, config.FLAG_THRESHOLD, config.ALERT_THRESHOLD)
         self.notifier = Notifier()
         self.hub = Hub()
-        self.sim = Simulator(self.ingest, config.SIM_RATE)
+        self.sim = Simulator(self.ingest, config.SIM_RATE,
+                             demo_user={"user_id": config.DEMO_USER_ID, "name": config.DEMO_USER_NAME})
+        self._last_test = 0.0
         self._last_alert: Dict[str, datetime] = {}
         self.started = time.time()
 
@@ -94,6 +97,18 @@ class Aegis:
         self.engine.load_all()
         if empty:
             self.seed()
+        self.ensure_demo_customer()
+
+    def ensure_demo_customer(self) -> None:
+        """Register the single demo cardholder (and give it a history if the DB predates it)."""
+        d = self.sim.demo
+        with SessionLocal() as s:
+            c = s.get(Customer, d.user_id) or Customer(user_id=d.user_id)
+            c.name, c.email, c.bank, c.is_demo = d.name, config.DEMO_EMAIL, config.DEMO_BANK, True
+            s.add(c)
+            if not s.scalar(select(func.count()).where(Transaction.user_id == d.user_id)):
+                s.add_all([Transaction(**r, source="seed") for r in self.sim.profile_history(d)])
+            s.commit()
 
     def seed(self) -> int:
         rows = self.sim.seed_history()
@@ -144,26 +159,48 @@ class Aegis:
         return {k: p[k] for k in TXN_FIELDS if k in p}
 
     async def ingest(self, payload: dict, source: str = "api", scenario: Optional[str] = None) -> dict:
-        t0 = time.perf_counter()
+        """The real-time path: validate -> load history -> run rules + decide -> persist -> push.
+
+        Every stage is timed and returned, so "how is it real-time?" is answered with numbers.
+        The alert (SES/SNS) runs after the response, off the hot path.
+        """
+        clock = [time.perf_counter()]
+        stages: Dict[str, float] = {}
+
+        def lap(name: str) -> None:
+            clock.append(time.perf_counter())
+            stages[name] = round((clock[-1] - clock[-2]) * 1000, 3)
+
         data = self.normalize(payload)
         with SessionLocal() as s:
             if s.get(Transaction, data["id"]):
                 raise ValueError(f"transaction {data['id']} already exists")
+            lap("validate")
             view = Txn(**{k: data[k] for k in data if k != "user_name"})
-            ev = self.engine.evaluate(view, self._history(s, data["user_id"], data["ts"]))
+            history = self._history(s, data["user_id"], data["ts"])
+            lap("history")
+            ev = self.engine.evaluate(view, history)
+            lap("rules")
             m = Transaction(**data, risk_score=ev.score, risk_level=ev.level,
-                            status="flagged" if ev.flagged else "clean", source=source, scenario=scenario)
+                            status="flagged" if ev.flagged else "clean", source=source, scenario=scenario,
+                            decision=ev.decision, decision_reason=ev.decision_reason, tier=ev.standing.get("tier"))
             m.flags = [Flag(rule_id=h.rule_id, rule_name=h.rule_name, score=h.score, weight=h.weight,
                             contribution=h.contribution, reason=h.reason, evidence=h.evidence) for h in ev.hits]
-            m.latency_ms = round((time.perf_counter() - t0) * 1000, 2)
             s.add(m)
+            s.commit()
+            lap("persist")
+            m.stages = dict(stages)
+            m.latency_ms = round((clock[-1] - clock[0]) * 1000, 2)
             s.commit()
             d = txn_dict(m)
         evd = ev.to_dict()
+        evd["tier"] = ev.standing.get("tier")
         await self.hub.broadcast("txn", d)
+        lap("broadcast")
         if ev.alert:
             asyncio.create_task(self._alert(d, evd))
-        return {"transaction": d, "evaluation": evd}
+        return {"transaction": d, "evaluation": evd, "decision": ev.decision, "stages": stages,
+                "latency_ms": round((clock[-1] - clock[0]) * 1000, 2)}
 
     async def _alert(self, txn: dict, ev: dict, force: bool = False) -> List[dict]:
         now = datetime.utcnow()
@@ -187,6 +224,24 @@ class Aegis:
         for n in out:
             await self.hub.broadcast("alert", n)
         return out
+
+    async def send_test_alert(self) -> List[dict]:
+        """One sample alert to prove delivery end to end (rate-limited: the endpoint is public)."""
+        if time.time() - self._last_test < 15:
+            raise ValueError("a test alert was sent less than 15s ago")
+        self._last_test = time.time()
+        txn = {"id": "TEST-" + secrets.token_hex(3).upper(), "user_id": config.DEMO_USER_ID,
+               "user_name": config.DEMO_USER_NAME, "amount": 4999.0, "currency": "USD", "merchant": "AEGIS test",
+               "category": "test", "city": "Hyderabad", "country": "IN", "device_id": "-",
+               "ts": iso(datetime.utcnow())}
+        ev = {"score": 99.0, "level": "critical", "decision": "hold", "tier": "test",
+              "decision_reason": "Test alert from the AEGIS console: if you can read this, delivery works",
+              "hits": [{"rule_name": "Delivery test", "reason": "Sent from Alerts > Send test alert", "contribution": 0.99}]}
+        return await self._alert(txn, ev, force=True)
+
+    def recheck_notifier(self) -> dict:
+        self.notifier.configure()
+        return self.notifier.status()
 
     # ------------------------------------------------------------------ review workflow
     async def review(self, txn_id: str, action: str, reviewer: str, note: str) -> dict:
@@ -223,6 +278,11 @@ class Aegis:
                 "home": Counter(h.city for h in hist if h.city).most_common(1)[0][0] if hist else "",
                 "fraud_count": sum(1 for h in hist if h.status == "fraud"),
             }
+            cust = s.get(Customer, t.user_id)
+            d["cardholder"].update(email=cust.email if cust else "", bank=cust.bank if cust else "",
+                                   is_demo=bool(cust and cust.is_demo))
+            # standing *now* (after reviews), vs. d["tier"] = standing when it was scored
+            d["standing"] = account_standing([Txn.from_model(h) for h in hist], datetime.utcnow())
             d["timeline"] = [txn_dict(h, detail=False) for h in hist[:40]]
             d["notifications"] = [notif_dict(n) for n in s.execute(
                 select(Notification).where(Notification.txn_id == txn_id).order_by(Notification.ts)).scalars()]
@@ -279,6 +339,9 @@ class Aegis:
             total = sum(by_status.values())
             last60 = s.scalar(select(func.count()).where(live, Transaction.ts >= now - timedelta(seconds=60)))
             avg_latency = s.scalar(select(func.avg(Transaction.latency_ms)).where(live, Transaction.ts >= now - timedelta(minutes=5)))
+            by_decision = dict(s.execute(select(Transaction.decision, func.count())
+                                         .where(live, Transaction.decision.is_not(None))
+                                         .group_by(Transaction.decision)).all())
             exposure = s.scalar(select(func.sum(Transaction.amount)).where(Transaction.status == "flagged")) or 0
             prevented = s.scalar(select(func.sum(Transaction.amount)).where(Transaction.status == "fraud")) or 0
 
@@ -325,6 +388,7 @@ class Aegis:
         flagged_total = sum(v for k, v in by_status.items() if k != "clean")
         return {
             "total": total, "by_status": by_status, "flagged_total": flagged_total,
+            "by_decision": {k: by_decision.get(k, 0) for k in DECISIONS},
             "pending": by_status.get("flagged", 0), "tpm": last60, "avg_latency_ms": round(avg_latency or 0, 2),
             "exposure": round(exposure, 2), "prevented": round(prevented, 2), "series": series, "rules": rules,
             "alerts": {"sent": n_alerts, "suppressed": suppressed, "mode": self.notifier.mode},

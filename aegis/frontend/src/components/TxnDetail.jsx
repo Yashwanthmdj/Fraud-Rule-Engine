@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import WorldMap from './WorldMap'
-import { Icon, LevelBadge, RiskRing, StatusPill, Empty } from './ui'
-import { api } from '../lib/api'
-import { money, dateTime, clock, flag, pretty, ago } from '../lib/format'
+import { Icon, LevelBadge, RiskRing, StatusPill, Empty, DecisionBadge, TierPill } from './ui'
+import { api, apiUrl } from '../lib/api'
+import { money, dateTime, clock, flag, pretty, ago, TIER_LABEL } from '../lib/format'
 
 function TravelEvidence({ ev, id }) {
   return (
@@ -104,7 +104,7 @@ export default function TxnDetail({ id, onAct, tick, toast }) {
           <div className="dt-amt mono">{money(d.amount, 2)} <small>{d.currency}</small></div>
           <div className="dt-merch">{d.merchant} <span className="muted">· {pretty(d.category)}</span></div>
           <div className="dt-meta">
-            <LevelBadge level={d.risk_level} /> <StatusPill status={d.status} />
+            <LevelBadge level={d.risk_level} /> <DecisionBadge decision={d.decision} /> <StatusPill status={d.status} />
             {d.scenario && <span className="pill st-scenario" title="Injected by the Attack Lab (ground truth)">⚑ {pretty(d.scenario.split(':')[0])}</span>}
           </div>
         </div>
@@ -117,6 +117,14 @@ export default function TxnDetail({ id, onAct, tick, toast }) {
         <div><span>Device</span><b className="mono">{d.device_id || '—'}</b><small className="mono">{d.ip}</small></div>
         <div><span>Decision time</span><b className="mono">{d.latency_ms} ms</b><small className="mono">{d.id}</small></div>
       </div>
+
+      {d.decision && (
+        <div className="verdict">
+          <DecisionBadge decision={d.decision} />
+          <p>{d.decision_reason}{d.tier && <span className="muted"> · account was <b>{TIER_LABEL[d.tier] || d.tier}</b> when scored</span>}</p>
+          <span className="mono muted">{d.latency_ms} ms</span>
+        </div>
+      )}
 
       <div className="decide">
         <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add an investigation note (optional)…" />
@@ -141,6 +149,7 @@ export default function TxnDetail({ id, onAct, tick, toast }) {
               </div>
               <div className="why-track"><div className="why-fill" style={{ width: `${h.contribution * 100}%` }} /></div>
               <p>{h.reason}</p>
+              {h.evidence?.learned && <div className="learned"><Icon name="brain" size={13} />Learned from an analyst decision on {h.evidence.learned.txn_id}: confidence ×{h.evidence.learned.discount}</div>}
               {h.rule_id === 'impossible_travel' && <TravelEvidence ev={h.evidence} id={d.id} />}
               {h.rule_id === 'velocity' && <VelocityEvidence ev={h.evidence} />}
               {h.rule_id === 'amount_anomaly' && <AmountEvidence ev={h.evidence} timeline={d.timeline} amount={d.amount} />}
@@ -157,6 +166,18 @@ export default function TxnDetail({ id, onAct, tick, toast }) {
 
       <div className="two">
         <section>
+          <h4>Account standing</h4>
+          {d.standing && (
+            <div className="standing">
+              <div className="standing-h">
+                <span className="muted">Now</span> <TierPill tier={d.standing.tier} />
+                {d.tier && d.tier !== d.standing.tier && <span className="muted">was <TierPill tier={d.tier} /> when this was scored</span>}
+                {d.cardholder.bank && <span className="pill">{d.cardholder.bank}</span>}
+                {d.cardholder.is_demo && <span className="pill st-scenario"><Icon name="user" size={11} /> demo customer</span>}
+              </div>
+              <ul>{d.standing.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+            </div>
+          )}
           <h4>Cardholder baseline</h4>
           <div className="profile">
             <div><span>Home</span><b>{d.cardholder.home}</b></div>
@@ -188,8 +209,11 @@ export default function TxnDetail({ id, onAct, tick, toast }) {
             </div>
           ))}
           <div className="row gap">
-            <a className="btn sm" href={`/api/notifications/preview/${d.id}`} target="_blank" rel="noreferrer"><Icon name="mail" size={13} />Preview email</a>
-            <button className="btn sm" onClick={async () => { const r = await api.resendAlert(d.id); toast({ tone: 'info', title: `Alert ${r[0]?.status}`, body: r[0]?.subject }) }}><Icon name="send" size={13} />Send alert now</button>
+            <a className="btn sm" href={apiUrl(`/api/notifications/preview/${d.id}`)} target="_blank" rel="noreferrer"><Icon name="mail" size={13} />Preview email</a>
+            <button className="btn sm" onClick={async () => {
+              try { const r = await api.resendAlert(d.id); toast({ tone: r.some((n) => n.status === 'failed') ? 'crit' : 'info', title: `Case report ${r.map((n) => `${n.channel.toUpperCase()} ${n.status}`).join(' · ')}`, body: r[0]?.error || r[0]?.subject }) }
+              catch (e) { toast({ tone: 'crit', title: 'Report failed', body: e.message }) }
+            }}><Icon name="send" size={13} />Email case report</button>
           </div>
           {d.reviews.map((r, i) => (
             <div key={i} className="audit">

@@ -75,7 +75,7 @@ export default function App() {
         if (t.risk_level === 'critical') {
           setThreat((n) => n + 1)
           if (soundRef.current) beep()
-          toast({ tone: 'crit', title: `Critical · ${money(t.amount)} at ${t.merchant}`,
+          toast({ tone: 'crit', title: `${t.decision === 'decline' ? 'Declined' : t.decision === 'hold' ? 'Held' : 'Critical'} · ${money(t.amount)} at ${t.merchant}`,
             body: `${flag(t.country)} ${t.user_name} · ${t.flags.map((f) => f.rule_name).join(' + ')}`, onClick: () => select(t.id), ttl: 7000 })
         }
         break
@@ -136,7 +136,7 @@ export default function App() {
         {tab === 'queue' && <ReviewQueue selected={selected} setSelected={setSelected} tick={tick} stats={stats} reviewer={reviewer} toast={toast} now={now} />}
         {tab === 'rules' && <RulesLab tick={tick} stats={stats} toast={toast} />}
         {tab === 'attack' && <AttackLab stats={stats} feed={feed} toast={toast} onSelect={select} tick={tick} />}
-        {tab === 'alerts' && <Alerts tick={tick} onSelect={select} />}
+        {tab === 'alerts' && <Alerts tick={tick} onSelect={select} toast={toast} />}
       </main>
 
       <div className="toasts" aria-live="polite">

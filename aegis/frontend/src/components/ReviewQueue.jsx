@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TxnDetail from './TxnDetail'
-import { Icon, LevelBadge, Empty } from './ui'
+import { Icon, LevelBadge, DecisionBadge, Empty } from './ui'
 import { api } from '../lib/api'
 import { money, ago, flag, pretty } from '../lib/format'
 
@@ -86,6 +86,7 @@ export default function ReviewQueue({ selected, setSelected, tick, stats, review
               <div className="q-r1">
                 <b className="mono">{money(t.amount)}</b>
                 <span className="q-merch">{t.merchant}</span>
+                <DecisionBadge decision={t.decision} />
                 <LevelBadge level={t.risk_level} score={t.risk_score} />
               </div>
               <div className="q-r2 muted">

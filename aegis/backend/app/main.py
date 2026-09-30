@@ -81,7 +81,9 @@ class BacktestIn(BaseModel):
 
 
 # ---------------------------------------------------------------- transactions
-@app.post("/api/transactions", tags=["transactions"], summary="Score and persist a transaction in real time")
+@app.post("/api/transactions", tags=["transactions"], summary="Score and persist a transaction in real time",
+          description="Returns the decision (approve / step_up / hold / decline), the risk explanation and "
+                      "per-stage timings synchronously, the way a payment switch would call it.")
 async def ingest(txn: TxnIn):
     try:
         return await aegis.ingest(txn.model_dump(), source="api")
@@ -170,10 +172,29 @@ async def test_notification(txn_id: str):
         d = aegis.detail(txn_id)
     except KeyError:
         raise HTTPException(404, "transaction not found")
-    ev = {"score": d["risk_score"], "level": d["risk_level"],
-          "hits": [{"rule_name": f["rule_name"], "reason": f["reason"], "contribution": f["contribution"]}
-                   for f in d["flags"]]}
-    return await aegis._alert(d, ev, force=True)
+    return await aegis._alert(d, _ev_from_detail(d), force=True)
+
+
+@app.post("/api/notifications/test", tags=["alerts"], summary="Send one sample alert to prove SES/SNS delivery")
+async def send_test_alert():
+    try:
+        return await aegis.send_test_alert()
+    except ValueError as exc:
+        raise HTTPException(429, str(exc))
+
+
+@app.post("/api/notifications/recheck", tags=["alerts"], summary="Re-run the AWS pre-flight checks")
+async def recheck_notifier():
+    out = await asyncio.to_thread(aegis.recheck_notifier)
+    await aegis.hub.broadcast("settings", {"notifier": out})
+    return out
+
+
+def _ev_from_detail(d: dict) -> dict:
+    return {"score": d["risk_score"], "level": d["risk_level"], "decision": d.get("decision"),
+            "decision_reason": d.get("decision_reason"), "tier": d.get("tier"),
+            "hits": [{"rule_name": f["rule_name"], "reason": f["reason"], "contribution": f["contribution"]}
+                     for f in d["flags"]]}
 
 
 @app.get("/api/notifications/preview/{txn_id}", tags=["alerts"], summary="Render the alert email HTML")
@@ -183,15 +204,16 @@ def preview_notification(txn_id: str):
         d = aegis.detail(txn_id)
     except KeyError:
         raise HTTPException(404, "transaction not found")
-    ev = {"score": d["risk_score"], "level": d["risk_level"], "hits": d["flags"]}
-    return HTMLResponse(aegis.notifier.html_body(d, ev))
+    return HTMLResponse(aegis.notifier.html_body(d, _ev_from_detail(d)))
 
 
 # ---------------------------------------------------------------- simulator / attack lab
 @app.get("/api/simulator", tags=["simulator"])
 def simulator():
+    demo = aegis.sim.demo
     return {"running": aegis.sim.running, "rate": aegis.sim.rate, "scenarios": aegis.sim.SCENARIOS,
-            "users": len(aegis.sim.users), "log": aegis.attack_runs()}
+            "users": len(aegis.sim.users), "log": aegis.attack_runs(),
+            "demo_user": {"user_id": demo.user_id, "name": demo.name, "home": demo.home[0]} if demo else None}
 
 
 @app.patch("/api/simulator", tags=["simulator"])

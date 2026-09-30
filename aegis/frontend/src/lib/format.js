@@ -45,3 +45,7 @@ export const levelOf = (score, t) => {
 }
 
 export const pretty = (s) => (s || '').replace(/_/g, ' ')
+
+export const DECISION_LABEL = { approve: 'Approve', step_up: 'Step-up OTP', hold: 'Hold', decline: 'Decline' }
+
+export const TIER_LABEL = { new: 'New', trusted: 'Trusted', normal: 'Normal', watchlist: 'Watchlist', compromised: 'Compromised' }

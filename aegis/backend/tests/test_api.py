@@ -37,3 +37,23 @@ def test_end_to_end_review_flow():
         assert c.patch("/api/settings/thresholds", json={"flag": 90, "alert": 50}).status_code == 400
         bt = c.post("/api/backtest", json={"limit": 50, "rules": {"impossible_travel": {"enabled": False}}}).json()
         assert bt["evaluated"] >= 2
+
+
+def test_realtime_decision_stages_demo_user_and_test_alert():
+    with TestClient(app) as c:
+        sim = c.get("/api/simulator").json()
+        demo = sim["demo_user"]
+        assert demo and demo["user_id"] in {u.user_id for u in aegis.sim.users}
+        r = c.post("/api/transactions", json={"user_id": demo["user_id"], "amount": 30}).json()
+        assert r["decision"] in {"approve", "step_up", "hold", "decline"}
+        assert {"validate", "history", "rules", "persist", "broadcast"} <= set(r["stages"])
+        d = c.get(f"/api/transactions/{r['transaction']['id']}").json()
+        assert d["cardholder"]["is_demo"] and d["standing"]["tier"] in {"trusted", "normal", "new"}
+        assert d["decision"] == r["decision"] and d["stages"]
+
+        st = c.get("/api/settings").json()["notifier"]
+        assert st["mode"] == "dry-run" and st["checks"]
+        sent = c.post("/api/notifications/test").json()
+        assert sent[0]["status"] == "simulated"
+        assert c.post("/api/notifications/test").status_code == 429
+        assert set(c.get("/api/stats").json()["by_decision"]) == {"approve", "step_up", "hold", "decline"}

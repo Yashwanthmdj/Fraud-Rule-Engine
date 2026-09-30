@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import WorldMap from './WorldMap'
-import { Icon, LevelBadge, Empty } from './ui'
-import { money, compactMoney, num, ago, flag, pretty } from '../lib/format'
+import { Icon, LevelBadge, DecisionBadge, Empty } from './ui'
+import { money, compactMoney, num, ago, flag, pretty, DECISION_LABEL } from '../lib/format'
 
 function Kpi({ label, value, sub, tone, icon }) {
   return (
@@ -24,7 +24,7 @@ export function Kpis({ stats }) {
       <Kpi icon="shield" tone="good" label="Fraud confirmed" value={compactMoney(s.prevented)} sub={<>{num(s.by_status?.fraud || 0)} txns · {num(s.by_status?.cleared || 0)} cleared</>} />
       <Kpi icon="zap" label="Attacks caught" value={a.runs ? `${a.caught}/${a.runs}` : '—'}
         sub={a.avg_txns_to_detect ? <>detected by txn #{a.avg_txns_to_detect} on avg</> : 'launch one in Attack Lab'} />
-      <Kpi icon="cpu" label="Decision latency" value={<>{s.avg_latency_ms ?? '—'}<small>ms</small></>} sub="ingest → score → persist" />
+      <Kpi icon="cpu" label="Decision latency" value={<>{s.avg_latency_ms ?? '—'}<small>ms</small></>} sub="validate → rules → decide → persist" />
     </div>
   )
 }
@@ -85,10 +85,55 @@ export function LiveFeed({ feed, onSelect, now }) {
               <span className="muted">{t.user_name} · {t.city}{t.flags?.length ? ` · ${t.flags.map((f) => pretty(f.rule_id)).join(', ')}` : ''}</span>
             </span>
             <span className="feed-amt mono">{money(t.amount)}</span>
-            <span className="feed-score"><LevelBadge level={t.risk_level} score={t.risk_score} /></span>
+            <span className="feed-score"><LevelBadge level={t.risk_level} score={t.risk_score} />{t.decision && t.decision !== 'approve' && <DecisionBadge decision={t.decision} />}</span>
             <span className="feed-ago muted mono">{ago(t.ts, now)}</span>
           </button>
         ))}
+      </div>
+    </div>
+  )
+}
+
+const STAGES = [['validate', 'Validate'], ['history', 'Load history'], ['rules', 'Rules + decide'], ['persist', 'Persist']]
+
+function Pipeline({ feed, stats }) {
+  const recent = feed.filter((t) => t.stages).slice(0, 50)
+  const avg = STAGES.map(([k]) => (recent.length ? recent.reduce((a, t) => a + (t.stages[k] || 0), 0) / recent.length : 0))
+  const total = avg.reduce((a, b) => a + b, 0)
+  const last = recent[0]
+  const dec = stats?.by_decision || {}
+  const decMax = Math.max(1, ...Object.values(dec))
+  return (
+    <div className="card">
+      <div className="card-h"><h3><Icon name="cpu" size={15} /> Real-time pipeline</h3>
+        <span className="muted">avg of the last {recent.length} transactions · the decision is returned to the payment switch synchronously</span></div>
+      <div className="pipe">
+        <div>
+          <div className="pipe-bar">
+            {STAGES.map(([k], i) => <div key={k} className={`pipe-seg pl-${k}`} style={{ flexGrow: avg[i] || 0.001 }} title={`${k}: ${avg[i].toFixed(2)} ms`} />)}
+          </div>
+          <div className="pipe-legend">
+            {STAGES.map(([k, label], i) => <span key={k}><i className={`pl-${k}`} />{label} <b className="mono">{avg[i].toFixed(2)} ms</b></span>)}
+            <span>Total <b className="mono">{total.toFixed(2)} ms</b></span>
+          </div>
+          {last && (
+            <div className="pipe-last">
+              <span className="muted">Latest:</span> <b>{money(last.amount)}</b> at {last.merchant}
+              <span className="muted">→</span> <DecisionBadge decision={last.decision} />
+              <span className="mono muted">in {last.latency_ms} ms</span>
+            </div>
+          )}
+          <div className="pipe-flow">Then, off the hot path: WebSocket push to every open console, and an SES / SNS alert when risk crosses the alert threshold.</div>
+        </div>
+        <div className="mix">
+          {Object.keys(DECISION_LABEL).map((k) => (
+            <div key={k} className="mix-row">
+              <DecisionBadge decision={k} />
+              <div className="mix-track"><div className={`mix-fill mix-${k}`} style={{ width: `${((dec[k] || 0) / decMax) * 100}%` }} /></div>
+              <span className="mono muted">{num(dec[k] || 0)}</span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -123,6 +168,7 @@ export default function CommandCenter({ stats, feed, onSelect, now }) {
         </div>
         <LiveFeed feed={feed} onSelect={onSelect} now={now} />
       </div>
+      <Pipeline feed={feed} stats={stats} />
       <div className="cc-bottom">
         <Throughput series={stats?.series} thresholds={stats?.thresholds} />
         <RuleBreakdown rules={stats?.rules} />
