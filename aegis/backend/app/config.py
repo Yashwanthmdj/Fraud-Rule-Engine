@@ -15,7 +15,7 @@ ALERT_THRESHOLD = float(os.getenv("AEGIS_ALERT_THRESHOLD", 80))
 NOTIFY_MODE = os.getenv("AEGIS_NOTIFY_MODE", "auto")  # auto | ses | sns | both | dry-run
 AWS_REGION = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-1"))
 SES_FROM = os.getenv("AEGIS_SES_FROM", "")
-SNS_TOPIC_ARN = os.getenv("AEGIS_SNS_TOPIC_ARN", "")
+SNS_TOPIC_ARN = os.getenv("AEGIS_SNS_TOPIC_ARN") or os.getenv("AWS_SNS_TOPIC_ARN", "")
 ALERT_COOLDOWN_SECONDS = int(os.getenv("AEGIS_ALERT_COOLDOWN", 90))
 # Render sets RENDER_EXTERNAL_URL automatically, so alert links point at the live console.
 CONSOLE_URL = os.getenv("AEGIS_CONSOLE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "http://localhost:8000"
