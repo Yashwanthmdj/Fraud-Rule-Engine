@@ -1,206 +1,162 @@
-# AEGIS: Real-time Fraud Rule Engine + Review Console
+# AEGIS
 
-> Every transaction is scored in **under 10 ms**, explained in plain English, pushed live to a reviewer console, and escalated through **AWS SES / SNS** when it crosses the high-risk line.
-> New fraud rules are **hot-plugged**: drop a Python file into a folder and the engine starts using it within a second, with no restart and no change to the core.
+**A real-time fraud rule engine with a live investigation console.** AEGIS scores transactions, explains the signals behind each decision, and lets analysts review cases and test rule changes.
 
+> AEGIS is a demonstration project. It uses simulated cardholders and synthetic transactions; it is not a production-certified fraud or payment-processing system.
+
+## Deploy live
+
+The whole app (API, rule engine, simulator, WebSocket and console) runs as one Render service defined in [`render.yaml`](../render.yaml). Step-by-step AWS SES/SNS and Render setup, plus a jury demo script: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+
+## Start AEGIS
+
+Requirements: Python 3.9+, Node.js 18+, and npm.
+
+Run these commands from the project folder, the one containing `run.sh`. In this workspace, first enter that folder with `cd aegis`.
+
+```bash
+./run.sh
 ```
-./run.sh            →  http://localhost:8000
+
+On first run, the script installs dependencies and builds the web console. Open **http://localhost:8000** when the server starts. API documentation is at **http://localhost:8000/docs**.
+
+To stop the server, press `Ctrl+C` in its terminal. To clear the local database and reseed demo data, run:
+
+```bash
+./run.sh --reset
+```
+cd aegis
+./run.sh 
+
+## What you can do
+
+- **Monitor transactions:** View live traffic, risk indicators, and transaction locations in the Command Center.
+- **Review cases:** Inspect evidence, record a verdict, and see the audit history in the Review Queue.
+- **Test fraud scenarios:** Generate controlled attacks from the Attack Lab.
+- **Tune detection:** Change rule weights and parameters, then backtest before applying changes in the Rules Lab.
+- **Add rules:** Drop a Python plugin into `backend/app/rules/`; the engine discovers it without a restart.
+- **Send alerts:** Use AWS SES or SNS for critical events. Notifications run in dry-run mode by default.
+
+## Real-time decisions
+
+`POST /api/transactions` answers synchronously, the way a payment switch needs it:
+
+```json
+{ "decision": "hold", "latency_ms": 6.4,
+  "stages": { "validate": 1.9, "history": 2.5, "rules": 0.2, "persist": 1.7, "broadcast": 0.1 },
+  "evaluation": { "score": 85, "decision_reason": "Single strong signal on a trusted account: hold and verify with the customer",
+                  "standing": { "tier": "trusted" }, "hits": [ ... ] } }
 ```
 
----
-
-## Why AEGIS is different
-
-| Most fraud demos | AEGIS |
+| Decision | When |
 |---|---|
-| Hard-coded `if` statements inside the engine | **Plugin architecture.** Rules are auto-discovered `Rule` subclasses, **hot-reloaded from disk**, and **fault-isolated** (a crashing or syntax-broken rule is quarantined; scoring never stops) |
-| "Flagged: yes/no" | **Explainable scoring.** Every rule reports confidence, weight, a human-readable reason and structured evidence. The console shows the exact **noisy-OR** math behind each score |
-| Static threshold tweaking | **What-if backtesting.** Change weights, parameters or thresholds, replay recent real traffic, and see precision/recall *before* you ship |
-| Rules judged by gut feeling | **Precision from reviewer verdicts.** Each "Clear" or "Confirm fraud" decision feeds a live per-rule precision metric |
-| Static CSV of transactions | **Live traffic simulator** with 250 cardholders and 45 days of behavioural history, plus an **Attack Lab** that launches real fraud patterns on demand with ground-truth scoring |
-| An email per event (alert storm) | **Alert storm guard.** One alert per cardholder per cooldown window; suppressed alerts are still logged and auditable |
-| Table of rows | **Ops-grade console.** Live world map with impossible-travel arcs, keyboard triage (J/K/R/C/F), evidence visuals, audit trail, email preview |
+| **Approve** | risk below the review threshold |
+| **Step-up OTP** | elevated risk: confirm with OTP / biometrics |
+| **Hold** | high risk, or a single strong signal on an account in good standing |
+| **Decline** | critical risk with 2+ independent signals, any flagged transaction on a compromised account, or critical risk on a watchlisted account |
 
----
+The WebSocket push to consoles and the SES/SNS alert happen after the response, off the hot path.
 
-## Problem statement → implementation
 
-| Requirement | Where / how |
+## Account memory and learning from reviewers
+
+- **Every customer is judged against their own baseline.** The same large purchase is approved for a customer who habitually spends that much and held for one who doesn't.
+- **Account standing** (Trusted, Normal, New, Watchlist, Compromised) comes from reviewer verdicts. After an analyst confirms fraud, every following transaction on that account is declined, even a small one, until the 30-day window passes.
+- **Learning:** when an analyst clears a large purchase as genuine, a similar amount later scores far lower ("Learned from analyst decision"). Confirmed fraud is excluded from the spending baseline, so fraudulent amounts never become "normal".
+
+
+## How scoring works
+
+Each rule returns a confidence value from 0 to 1. AEGIS multiplies that value by the rule's weight, then combines the rule signals with noisy-OR fusion:
+
+```text
+contribution = min(1, confidence * weight)
+risk = 100 * (1 - product(1 - contribution))
+```
+
+Multiple warning signs can raise the total risk together. By default, scores below 35 are low, scores from 35 to 79 are flagged for review, and scores of 80 or higher are critical. Thresholds can be changed in the Rules Lab.
+
+## Run with Docker
+
+From the project folder:
+
+```bash
+docker build -t aegis .
+docker run --rm -p 8000:8000 aegis
+```
+
+Docker runs in dry-run alert mode by default, so a `.env` file is not required. To configure AWS alerts, copy `.env.example` to `.env`, add your settings, and pass it to the container:
+
+```bash
+cp .env.example .env
+docker run --rm -p 8000:8000 --env-file .env aegis
+```
+
+## Development mode
+
+Run `./run.sh` once to install backend and frontend dependencies, then stop it with `Ctrl+C`. Start the backend and frontend in separate terminals, with both terminals opened in the project folder.
+
+Backend:
+
+```bash
+cd backend
+.venv/bin/uvicorn app.main:app --reload
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Open **http://localhost:5173** for the frontend. It proxies API and WebSocket requests to the backend on port 8000.
+
+## Built-in rules
+
+| Rule | What it detects |
 |---|---|
-| Rule engine for transaction risk evaluation | `backend/app/engine/core.py`: discovery, isolation, noisy-OR fusion, risk levels |
-| **Velocity** rule | `rules/velocity.py`: sliding window count, plus detection of the card-testing micro-charge signature |
-| **Unusual amount** rule | `rules/amount_anomaly.py`: *personal* baseline via robust z-score (median + MAD), plus a cold-start ceiling |
-| **Impossible geography** rule | `rules/impossible_travel.py`: haversine distance ÷ elapsed time vs. airliner speed |
-| Add rules without modifying the core | Drop a file in `backend/app/rules/`. The watcher hot-loads it (demo: `examples/foreign_cashout.py`) |
-| Persist transactions and fraud flags | SQLite (WAL) via SQLAlchemy: `transactions`, `flags`, `reviews`, `notifications`, `settings` |
-| React reviewer console | `frontend/`: React 18 + Vite, live over WebSocket |
-| Display flagged transactions | Command Center (map + live stream) and Review Queue (risk-sorted) |
-| Mark reviewed / cleared | Buttons or keys **R**, **C**, plus **F** (confirmed fraud) and **U** (reopen). Every action is audit-logged with reviewer and note |
-| AWS SES / SNS on high-risk threshold | `backend/app/notifier.py`: SES HTML+text email and/or SNS publish with message attributes, a dry-run fallback, and storm guard |
+| Velocity | Unusually frequent transactions and card-testing patterns |
+| Amount anomaly | Amounts that differ from a cardholder's normal spending |
+| Impossible travel | Transactions too far apart to be explained by normal travel |
+| Unrecognized device | Devices not previously associated with a cardholder |
+| High-risk merchant | Transactions involving categories such as gift cards or crypto |
+| Account standing | Accounts with confirmed fraud or several unresolved flags |
+| Foreign cash-out | Gift card / crypto / wire purchases from a country the card has never used |
 
-Two bonus rules ship to show composability: **Unrecognized Device** (with device trust-aging) and **High-Risk Merchant** (gift cards, crypto, wire, gambling).
+Transaction history used for scoring is limited to events before the transaction being evaluated. This avoids using future data during scoring and backtests.
 
----
+## Add a rule
 
-## Architecture
-
-```mermaid
-flowchart LR
-    SW[Payment switch / POS<br/>POST /api/transactions] --> ING
-    SIM[Traffic simulator<br/>+ Attack Lab] --> ING
-    ING[Ingest pipeline] --> CTX[Cardholder history<br/>90 days, strictly before txn]
-    CTX --> ENG{{Rule Engine}}
-    subgraph PLUG [backend/app/rules/  ← hot-reloaded]
-      R1[velocity] & R2[amount_anomaly] & R3[impossible_travel] & R4[new_device] & R5[merchant_risk] & R6[your_rule.py]
-    end
-    ENG <--> PLUG
-    ENG --> FUSE[Noisy-OR fusion → 0-100 risk]
-    FUSE --> DB[(SQLite<br/>txns · flags · reviews · alerts)]
-    FUSE -->|risk ≥ alert threshold| GUARD[Storm guard] --> AWS[AWS SES / SNS]
-    DB --> WS((WebSocket hub)) --> UI[React Review Console]
-    UI -->|review / tune / backtest| API[REST API] --> DB
-```
-
-**Scoring.** Each rule returns a confidence `s ∈ [0,1]`, and its contribution is `c = min(1, s × weight)`. Contributions are fused with a noisy-OR:
-
-```
-risk = 100 × (1 − Π (1 − cᵢ))
-```
-
-One overwhelming signal is enough on its own. Several weak, independent signals, such as a new device, a foreign country and a gift-card merchant, add up the way a human investigator's suspicion does. The score can never exceed 100, and the console prints this formula for every transaction.
-
-| Level | Default range | Effect |
-|---|---|---|
-| low | < 35 | stored, visible in live stream |
-| medium / high | 35 – 79 | **flagged** into the review queue |
-| critical | ≥ 80 | flagged **and** SES/SNS alert |
-
-Both thresholds are editable live from the Rules Lab and persisted.
-
----
-
-## Quick start
-
-Requirements: Python 3.9+ and Node 18+.
-
-```bash
-./run.sh              # installs everything on first run, builds the console, serves on :8000
-./run.sh --reset      # fresh database with newly seeded cardholder history
-```
-
-Or with Docker:
-
-```bash
-docker build -t aegis . && docker run -p 8000:8000 --env-file .env aegis
-```
-
-API docs (Swagger) are served at **http://localhost:8000/docs**.
-
-**Dev mode** (hot module reload for the UI):
-```bash
-cd backend && .venv/bin/uvicorn app.main:app --reload     # :8000
-cd frontend && npm run dev                                  # :5173 (proxies /api and /ws)
-```
-
----
-
-## 3-minute demo script
-
-1. **Command Center.** Traffic is already flowing (~70 txns/min). Point out the decision latency KPI (~5 ms).
-2. **Attack Lab → Fraud Storm.** Four attacks hit four victims at once. Watch the red impossible-travel arcs and pulsing critical points on the map, the critical toasts, and the "Attacks caught 4/4" scoreboard. The Alerts tab shows 4 alerts sent and the duplicates **suppressed** by the storm guard.
-3. **Review Queue.** Open the top item. Walk through *Why AEGIS scored it 97*: each rule's reason, the evidence visuals (globe arc with implied km/h, the velocity burst timeline, the amount strip vs. the cardholder's median) and the noisy-OR formula. Press **F** to confirm fraud; the queue auto-advances. Press **C** on a false positive. Click *Preview email* to show the exact SES message.
-4. **Extensibility, live.** In a terminal:
-   ```bash
-   cp examples/foreign_cashout.py backend/app/rules/
-   ```
-   The toast "Rule hot-loaded: Foreign Cash-Out" appears within a second. Launch *Account Takeover* and the new rule fires on its first transaction. No restart, and the engine code is untouched.
-5. **Rules Lab.** Raise *Unrecognized Device* weight → **Backtest**. The engine replays recent traffic under the proposed config and shows flagged before/after and precision/recall against reviewer labels plus attack ground truth. Click **Apply live**.
-6. *(Optional)* Break a rule on purpose (a syntax error in a file). The console shows it **quarantined** and scoring continues.
-
----
-
-## Writing a rule
-
-```python
-# backend/app/rules/round_amount.py
-from app.engine import Rule, RuleResult
-
-class RoundAmountRule(Rule):
-    id = "round_amount"
-    name = "Suspiciously Round Amount"
-    description = "Fraudsters test cards with round numbers like $500.00"
-    category = "behavioral"
-    default_weight = 0.3
-    params = {"min_amount": 200}                     # editable live in the console
-
-    def evaluate(self, txn, ctx):
-        if txn.amount >= self.p["min_amount"] and txn.amount % 100 == 0:
-            return RuleResult(0.6, f"${txn.amount:,.0f} is a round-number charge",
-                              {"amount": txn.amount})
-        return None                                   # didn't fire
-```
-
-A rule receives a frozen `Txn` and a `RuleContext` with helpers: `history(within=, limit=)`, `last()`, `known_devices(older_than=)` and `known_countries()`. History is always strictly *before* the transaction being scored, so the same rule runs unchanged in real time and in backtests with no look-ahead leakage.
-
----
+Create a Python file in `backend/app/rules/`. A rule subclasses `Rule` and returns a `RuleResult` when its condition matches. See [`examples/foreign_cashout.py`](examples/foreign_cashout.py) for a complete example. The rules watcher loads new plugins automatically.
 
 ## AWS alerts
 
-Out of the box AEGIS runs in **dry-run** mode. It renders and logs every alert, and the console shows `AWS DRY-RUN`. To go live:
+Alerts are logged locally in dry-run mode. To enable SES or SNS notifications:
 
-1. In SES, verify the sender (and, while in the SES sandbox, the recipient) email address.
-2. *(Optional)* Create an SNS topic and subscribe an email address, SMS number, Lambda or Slack webhook to it.
-3. `cp .env.example .env`, fill in your credentials, `AEGIS_SES_FROM`, `AEGIS_SES_TO` and optionally `AEGIS_SNS_TOPIC_ARN`, then run `./run.sh`.
+1. Copy `.env.example` to `.env`.
+2. Set the required AWS and AEGIS notification values, including `AEGIS_SES_FROM` and `AEGIS_SES_TO` for email.
+3. Start AEGIS with `./run.sh`, or pass `.env` to Docker with `--env-file .env`.
 
-The badge switches to `AWS LIVE`. IAM permissions needed: `ses:SendEmail`, `sns:Publish`. Each alert contains the score, the transaction facts, the rule-by-rule explanation, and a deep link (`/?txn=<id>`) that opens that transaction in the console.
+Never commit `.env` or AWS credentials. AWS permissions may include `ses:SendEmail` and `sns:Publish`, depending on which notification services you configure.
 
----
+## API and tests
 
-## API
+Interactive API documentation is available at **http://localhost:8000/docs** while the backend is running. The API supports transaction scoring and search, case reviews, rule configuration, backtesting, attack scenarios, notifications, and live WebSocket events.
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/api/transactions` | Score + persist a transaction, returns full evaluation |
-| GET | `/api/transactions?status=&level=&q=&sort=risk` | Query transactions |
-| GET | `/api/transactions/{id}` | Detail: flags, evidence, cardholder baseline, timeline, alerts, audit |
-| POST | `/api/transactions/{id}/review` | `{action: reviewed\|cleared\|fraud\|reopen, reviewer, note}` |
-| GET / PATCH | `/api/rules`, `/api/rules/{id}` | Inspect / enable / reweight / re-parameterise rules |
-| POST | `/api/rules/reload` | Force a rescan of the rules folder |
-| POST | `/api/backtest` | Replay traffic with a proposed config (no side effects) |
-| PATCH | `/api/settings/thresholds` | Flag / alert thresholds |
-| GET | `/api/notifications`, `/api/notifications/preview/{id}` | Alert log, rendered email |
-| POST | `/api/scenarios/{name}` | `card_testing`, `impossible_travel`, `amount_spike`, `account_takeover`, `fraud_storm` |
-| PATCH | `/api/simulator` | `{running, rate}` |
-| WS | `/ws` | Live events: `txn`, `review`, `alert`, `rules`, `stats`, `scenario` |
+Run the backend tests from the project folder:
 
 ```bash
-curl -X POST localhost:8000/api/transactions -H 'Content-Type: application/json' -d '{
-  "user_id":"C100037","amount":4999,"merchant":"Night Market","category":"electronics",
-  "city":"Tokyo","country":"JP","lat":35.68,"lon":139.69,"device_id":"dev_new","channel":"card_present"}'
+cd backend
+.venv/bin/python -m pytest -q
 ```
-
----
-
-## Tests
-
-```bash
-cd backend && .venv/bin/python -m pytest -q
-```
-
-The 12 tests cover plugin discovery, each rule firing and *not* firing, noisy-OR math, enable/re-weight, hot reload, quarantine of syntax-broken files, isolation of rules that raise at runtime, look-ahead safety, and an end-to-end API flow (ingest → flag → review → alert → backtest).
 
 ## Project layout
 
-```
-backend/app/
-  engine/base.py      Rule contract, Txn, RuleContext, geo/stat helpers
-  engine/core.py      discovery, hot reload, isolation, fusion, introspection
-  rules/              ← plugins (velocity, amount_anomaly, impossible_travel, new_device, merchant_risk)
-  service.py          ingest pipeline, websocket hub, review workflow, stats, backtest
-  notifier.py         AWS SES / SNS with dry-run + storm guard
-  simulator.py        cardholder population, seeding, attack scenarios
-  main.py             FastAPI routes + serves the built console
-frontend/src/
-  components/         CommandCenter, WorldMap, ReviewQueue, TxnDetail, RulesLab, AttackLab, Alerts
-examples/foreign_cashout.py   drop-in rule for the live extensibility demo
+```text
+backend/app/      API, scoring engine, rules, simulator, and notifications
+frontend/         React review console
+examples/         Example rule plugins
+run.sh            Install, build, and start AEGIS
 ```
