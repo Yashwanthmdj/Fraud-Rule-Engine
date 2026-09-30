@@ -4,6 +4,16 @@
 
 > AEGIS is a demonstration project. It uses simulated cardholders and synthetic transactions; it is not a production-certified fraud or payment-processing system.
 
+## 🔗 Project Links
+
+| Resource | Link |
+|---|---|
+| 🚀 Live Demo - Frontend | [Open AEGIS](https://frontend-ten-zeta-bjdigmd6tb.vercel.app/#command) |
+| 💻 Source Code | [GitHub Repository](https://github.com/Yashwanthmdj/Fraud-Rule-Engine) |
+| 👨‍💻 Developer | [M. Yashwanth](https://github.com/Yashwanthmdj) |
+
+
+
 ## Start AEGIS
 
 Requirements: Python 3.9+, Node.js 18+, and npm.
